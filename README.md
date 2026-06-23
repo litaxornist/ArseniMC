@@ -36,3 +36,60 @@ The recommended installation path is via Homebrew, which compiles the binary dir
 ```sh
 brew tap litaxornist/arsenimc
 brew install arsenimc
+```
+
+To build manually from source:
+
+```sh
+git clone [https://github.com/](https://github.com/)litaxornist/ArseniMC.git
+cd ArseniMC
+go mod tidy
+go build -ldflags="-s -w" -o arsenimc main.go
+sudo mv arsenimc /usr/local/bin/
+```
+
+## Usage
+
+ArseniMC is strictly operated via command-line arguments. 
+
+### Authentication
+Initialize the OAuth2 device-code handshake. Tokens are stored in `~/.auth`.
+```sh
+arsenimc a
+```
+*Provide a pre-authorized token directly using `-k <token>`.*
+
+### Client Initialization
+Construct a client environment, resolving all natives, libraries, and modloader dependencies.
+```sh
+arsenimc -d <version> <target_type> <instance_name>
+```
+*Example:* `arsenimc -d 1.21.1 fabric client_01`
+
+### Server Initialization
+Generate a headless server environment. Auto-accepts EULA and writes networking configuration.
+```sh
+arsenimc -s <version> <target_type> <instance_name> [port]
+```
+*Example:* `arsenimc -s 1.21.1 paper node_01 25565`
+
+### Execution & Telemetry
+Fire the Java payload. Targetting a server (`-s`) will drop into a live hardware telemetry monitor.
+```sh
+arsenimc start -c <instance_name>
+arsenimc start -s <instance_name>
+```
+
+### Dependency Injection
+Drop `.jar` dependencies directly into target environments.
+```sh
+arsenimc -m <direct_url> <instance_name>
+```
+
+## Disclaimer
+
+ArseniMC is an independent open-source utility. It is not affiliated with, endorsed by, or connected to Mojang AB, Microsoft Corporation, or Apple Inc. All network requests are made directly to public APIs provided by Mojang, PaperMC, and FabricMC.
+
+## License
+
+This software is licensed under the MIT License. See the `LICENSE` file for full text.
