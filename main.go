@@ -17,6 +17,7 @@ import (
 	"time"
 )
 
+// YOUR EXACT AZURE CLIENT ID
 const clientID = "c2025a42-18d5-47d8-a256-be3ef3009623"
 const msAuthURL = "https://login.microsoftonline.com/consumers/oauth2/v2.0/devicecode"
 
@@ -117,6 +118,96 @@ func chkAuth() AuthData {
 }
 
 // ---------------------------------------------------------
+// BULLETPROOF AUTHENTICATION ENGINE (OAUTH2)
+// ---------------------------------------------------------
+func doDeviceAuth() string {
+	req, _ := http.NewRequest("POST", msAuthURL, strings.NewReader(fmt.Sprintf("client_id=%s&scope=XboxLive.signin offline_access", clientID)))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	resp, err := http.DefaultClient.Do(req)
+
+	if err != nil {
+		fmt.Println("CRITICAL: Network failure reaching Microsoft OAuth.")
+		os.Exit(1)
+	}
+	defer resp.Body.Close()
+
+	var res map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&res)
+
+	// Catch Microsoft API rejections securely without crashing
+	if res["error"] != nil {
+		fmt.Printf("\n[MICROSOFT REJECTION] %s\nDetails: %v\n", res["error"], res["error_description"])
+		fmt.Println("ACTION REQUIRED: Ensure 'Allow public client flows' is set to YES in Azure Authentication settings.")
+		os.Exit(1)
+	}
+
+	// Double-check payload integrity
+	if res["user_code"] == nil || res["verification_uri"] == nil {
+		fmt.Println("CRITICAL: Received malformed payload from Microsoft.")
+		os.Exit(1)
+	}
+
+	fmt.Printf("\nGo to: %s\nEnter Code: %s\nWaiting...\n", res["verification_uri"], res["user_code"])
+
+	for {
+		time.Sleep(time.Duration(res["interval"].(float64)) * time.Second)
+		pr, _ := http.NewRequest("POST", "https://login.microsoftonline.com/consumers/oauth2/v2.0/token", strings.NewReader(fmt.Sprintf("grant_type=urn:ietf:params:oauth:grant-type:device_code&client_id=%s&device_code=%s", clientID, res["device_code"])))
+		pr.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		pres, _ := http.DefaultClient.Do(pr)
+
+		var t map[string]interface{}
+		json.NewDecoder(pres.Body).Decode(&t)
+		pres.Body.Close()
+
+		if token, ok := t["access_token"].(string); ok {
+			return token
+		}
+
+		if t["error"] != nil && t["error"] != "authorization_pending" {
+			fmt.Printf("\n[AUTH FAILED] %s\n", t["error"])
+			os.Exit(1)
+		}
+	}
+}
+
+func runFullAuthFlow(msToken string) {
+	fmt.Println("Executing Xbox Live Handshake...")
+	xB, _ := json.Marshal(map[string]interface{}{"Properties": map[string]interface{}{"AuthMethod": "RPS", "SiteName": "user.auth.xboxlive.com", "RpsTicket": "d=" + msToken}, "RelyingParty": "http://auth.xboxlive.com", "TokenType": "JWT"})
+	req, _ := http.NewRequest("POST", "https://user.auth.xboxlive.com/user/authenticate", bytes.NewBuffer(xB))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	res, _ := http.DefaultClient.Do(req)
+	var xbl map[string]interface{}
+	json.NewDecoder(res.Body).Decode(&xbl)
+
+	sB, _ := json.Marshal(map[string]interface{}{"Properties": map[string]interface{}{"SandboxId": "RETAIL", "UserTokens": []string{xbl["Token"].(string)}}, "RelyingParty": "rp://api.minecraftservices.com/", "TokenType": "JWT"})
+	req2, _ := http.NewRequest("POST", "https://xsts.auth.xboxlive.com/xsts/authorize", bytes.NewBuffer(sB))
+	req2.Header.Set("Content-Type", "application/json")
+	req2.Header.Set("Accept", "application/json")
+	res2, _ := http.DefaultClient.Do(req2)
+	var xsts map[string]interface{}
+	json.NewDecoder(res2.Body).Decode(&xsts)
+
+	uhs := xsts["DisplayClaims"].(map[string]interface{})["xui"].([]interface{})[0].(map[string]interface{})["uhs"].(string)
+	mB, _ := json.Marshal(map[string]interface{}{"identityToken": fmt.Sprintf("XBL3.0 x=%s;%s", uhs, xsts["Token"].(string))})
+	req3, _ := http.NewRequest("POST", "https://api.minecraftservices.com/authentication/login_with_xbox", bytes.NewBuffer(mB))
+	req3.Header.Set("Content-Type", "application/json")
+	res3, _ := http.DefaultClient.Do(req3)
+	var mc map[string]interface{}
+	json.NewDecoder(res3.Body).Decode(&mc)
+
+	req4, _ := http.NewRequest("GET", "https://api.minecraftservices.com/minecraft/profile", nil)
+	req4.Header.Set("Authorization", "Bearer "+mc["access_token"].(string))
+	res4, _ := http.DefaultClient.Do(req4)
+	var prof map[string]interface{}
+	json.NewDecoder(res4.Body).Decode(&prof)
+
+	b, _ := json.Marshal(AuthData{UUID: prof["id"].(string), Name: prof["name"].(string), Token: mc["access_token"].(string)})
+	ioutil.WriteFile(authF, b, 0644)
+	fmt.Printf("Authorization sequence locked. Welcome, %s.\n", prof["name"].(string))
+}
+
+// ---------------------------------------------------------
 // UNIVERSAL CLIENT DOWNLOADER (VANILLA, FABRIC, FORGE, NEOFORGE)
 // ---------------------------------------------------------
 func dlClient(ver, typ, nam string) {
@@ -124,7 +215,6 @@ func dlClient(ver, typ, nam string) {
 	mcDir := filepath.Join(cliDir, nam, "minecraft")
 	os.MkdirAll(mcDir, 0755)
 
-	// 1. Always fetch Vanilla Base First (Required for all modloaders)
 	resp, _ := http.Get("https://piston-meta.mojang.com/mc/game/version_manifest_v2.json")
 	var manifest map[string]interface{}
 	json.NewDecoder(resp.Body).Decode(&manifest)
@@ -150,7 +240,6 @@ func dlClient(ver, typ, nam string) {
 	cURL := vData["downloads"].(map[string]interface{})["client"].(map[string]interface{})["url"].(string)
 	dlFile(cURL, filepath.Join(vDir, ver+".jar"))
 
-	// Concurrently fetch Base Libraries and Assets
 	fmt.Println("Downloading Base Assets & ARM64 Natives...")
 	libs := vData["libraries"].([]interface{})
 	libDir := filepath.Join(mcDir, "libraries")
@@ -183,7 +272,6 @@ func dlClient(ver, typ, nam string) {
 	}
 	wg.Wait()
 
-	// 2. Modloader Injectors
 	if typ == "fabric" {
 		fmt.Println("Injecting Fabric Headless Installer...")
 		resp, _ := http.Get("https://meta.fabricmc.net/v2/versions/installer")
@@ -200,8 +288,6 @@ func dlClient(ver, typ, nam string) {
 
 	} else if typ == "forge" {
 		fmt.Println("Injecting Forge Headless Installer...")
-		// Forge doesn't have a clean meta API, we construct the direct maven URL.
-		// Note: Requires exact forge version string in advanced setups. This assumes standard release format.
 		forgeURL := fmt.Sprintf("https://maven.minecraftforge.net/net/minecraftforge/forge/%s/forge-%s-installer.jar", ver, ver)
 		instPath := filepath.Join(mcDir, "forge-installer.jar")
 		dlFile(forgeURL, instPath)
@@ -279,19 +365,17 @@ func startCli(nam string) {
 	auth := chkAuth()
 	mcDir := filepath.Join(cliDir, nam, "minecraft")
 
-	// Dynamic Profile Discovery (Finds Fabric/Forge/Vanilla JSONs)
 	vDir, _ := ioutil.ReadDir(filepath.Join(mcDir, "versions"))
 	var activeVer string
 	var mainClass string
 
-	// Prioritize modded profiles if they exist in the folder
 	for _, d := range vDir {
 		if d.IsDir() {
 			if strings.Contains(d.Name(), "fabric") || strings.Contains(d.Name(), "forge") || strings.Contains(d.Name(), "neoforge") {
 				activeVer = d.Name()
 				break
 			}
-			activeVer = d.Name() // Fallback to vanilla
+			activeVer = d.Name()
 		}
 	}
 
@@ -300,7 +384,7 @@ func startCli(nam string) {
 	json.Unmarshal(bJSON, &profileData)
 	mainClass = profileData["mainClass"].(string)
 
-	natDir := filepath.Join(mcDir, "versions", strings.Split(activeVer, "-")[0], "natives") // Natives are always tied to base version
+	natDir := filepath.Join(mcDir, "versions", strings.Split(activeVer, "-")[0], "natives")
 
 	var cpStrings []string
 	filepath.Walk(filepath.Join(mcDir, "libraries"), func(p string, info os.FileInfo, err error) error {
@@ -310,7 +394,6 @@ func startCli(nam string) {
 		return nil
 	})
 
-	// Add base jar
 	baseVer := strings.Split(activeVer, "-")[0]
 	cpStrings = append(cpStrings, filepath.Join(mcDir, "versions", baseVer, baseVer+".jar"))
 	cp := strings.Join(cpStrings, ":")
@@ -368,7 +451,7 @@ func startSer(nam string) {
 }
 
 // ---------------------------------------------------------
-// UTILS & AUTH
+// UTILS
 // ---------------------------------------------------------
 func dlMod(url, tgt string) {
 	mDir := filepath.Join(cliDir, tgt, "minecraft", "mods")
@@ -377,65 +460,6 @@ func dlMod(url, tgt string) {
 	}
 	os.MkdirAll(mDir, 0755)
 	dlFile(url, filepath.Join(mDir, filepath.Base(url)))
-}
-
-func doDeviceAuth() string {
-	req, _ := http.NewRequest("POST", msAuthURL, strings.NewReader(fmt.Sprintf("client_id=%s&scope=XboxLive.signin offline_access", clientID)))
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	resp, _ := http.DefaultClient.Do(req)
-	var res map[string]interface{}
-	json.NewDecoder(resp.Body).Decode(&res)
-	fmt.Printf("\nGo to: %s\nEnter Code: %s\nWaiting...\n", res["verification_uri"], res["user_code"])
-
-	for {
-		time.Sleep(time.Duration(res["interval"].(float64)) * time.Second)
-		pr, _ := http.NewRequest("POST", "https://login.microsoftonline.com/consumers/oauth2/v2.0/token", strings.NewReader(fmt.Sprintf("grant_type=urn:ietf:params:oauth:grant-type:device_code&client_id=%s&device_code=%s", clientID, res["device_code"])))
-		pr.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-		pres, _ := http.DefaultClient.Do(pr)
-		if pres.StatusCode == 200 {
-			var t map[string]interface{}
-			json.NewDecoder(pres.Body).Decode(&t)
-			return t["access_token"].(string)
-		}
-	}
-}
-
-func runFullAuthFlow(msToken string) {
-	// XBL -> XSTS -> MC -> Profile chain
-	fmt.Println("Executing Xbox Live Handshake...")
-	xB, _ := json.Marshal(map[string]interface{}{"Properties": map[string]interface{}{"AuthMethod": "RPS", "SiteName": "user.auth.xboxlive.com", "RpsTicket": "d=" + msToken}, "RelyingParty": "http://auth.xboxlive.com", "TokenType": "JWT"})
-	req, _ := http.NewRequest("POST", "https://user.auth.xboxlive.com/user/authenticate", bytes.NewBuffer(xB))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
-	res, _ := http.DefaultClient.Do(req)
-	var xbl map[string]interface{}
-	json.NewDecoder(res.Body).Decode(&xbl)
-
-	sB, _ := json.Marshal(map[string]interface{}{"Properties": map[string]interface{}{"SandboxId": "RETAIL", "UserTokens": []string{xbl["Token"].(string)}}, "RelyingParty": "rp://api.minecraftservices.com/", "TokenType": "JWT"})
-	req2, _ := http.NewRequest("POST", "https://xsts.auth.xboxlive.com/xsts/authorize", bytes.NewBuffer(sB))
-	req2.Header.Set("Content-Type", "application/json")
-	req2.Header.Set("Accept", "application/json")
-	res2, _ := http.DefaultClient.Do(req2)
-	var xsts map[string]interface{}
-	json.NewDecoder(res2.Body).Decode(&xsts)
-
-	uhs := xsts["DisplayClaims"].(map[string]interface{})["xui"].([]interface{})[0].(map[string]interface{})["uhs"].(string)
-	mB, _ := json.Marshal(map[string]interface{}{"identityToken": fmt.Sprintf("XBL3.0 x=%s;%s", uhs, xsts["Token"].(string))})
-	req3, _ := http.NewRequest("POST", "https://api.minecraftservices.com/authentication/login_with_xbox", bytes.NewBuffer(mB))
-	req3.Header.Set("Content-Type", "application/json")
-	res3, _ := http.DefaultClient.Do(req3)
-	var mc map[string]interface{}
-	json.NewDecoder(res3.Body).Decode(&mc)
-
-	req4, _ := http.NewRequest("GET", "https://api.minecraftservices.com/minecraft/profile", nil)
-	req4.Header.Set("Authorization", "Bearer "+mc["access_token"].(string))
-	res4, _ := http.DefaultClient.Do(req4)
-	var prof map[string]interface{}
-	json.NewDecoder(res4.Body).Decode(&prof)
-
-	b, _ := json.Marshal(AuthData{UUID: prof["id"].(string), Name: prof["name"].(string), Token: mc["access_token"].(string)})
-	ioutil.WriteFile(authF, b, 0644)
-	fmt.Printf("Authorization sequence locked. Welcome, %s.\n", prof["name"].(string))
 }
 
 func dlFile(url, dest string) {
