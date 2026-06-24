@@ -35,7 +35,7 @@ The recommended installation path is via Homebrew, which compiles the binary dir
 
 ```sh
 brew tap litaxornist/arsenimc
-brew install arsenimc
+brew install litaxornist/arsenimc/arsenic     
 ```
 
 To build manually from source:
